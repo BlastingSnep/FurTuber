@@ -7,6 +7,14 @@ import {
 	PoseLandmarker,
 	HandLandmarker,
 } from "@mediapipe/tasks-vision";
+import {
+	LipSyncController,
+	OPEN_LIPSYNC_VISEMES,
+	STANDARD_MOUTH_EXPRESSIONS,
+	WEBCAM_MOUTH_SOURCE_EXPRESSIONS,
+	inspectVrmExpressionRouting,
+	type StandardMouthExpression,
+} from "./lipsync";
 
 // ---------------------------------------------------------------------------
 // One-euro filter (vendored)
@@ -79,9 +87,10 @@ scene.add(sun);
 
 // Fallback mapping for avatars that only expose standard VRM 1.x expressions.
 // Each entry is [arkitBlendshapeName, weight]. Multiple sources are summed and clamped.
-const STANDARD_VRM_MAP: Record<string, [string, number][]> = {
-	blinkLeft: [["eyeBlinkLeft", 1]],
-	blinkRight: [["eyeBlinkRight", 1]],
+const STANDARD_VRM_MOUTH_MAP: Record<
+	StandardMouthExpression,
+	[string, number][]
+> = {
 	aa: [["jawOpen", 1]],
 	ih: [["mouthClose", 0.6]],
 	ou: [["mouthPucker", 1]],
@@ -93,6 +102,11 @@ const STANDARD_VRM_MAP: Record<string, [string, number][]> = {
 		["jawOpen", 0.4],
 		["mouthFunnel", 0.6],
 	],
+};
+
+const STANDARD_VRM_NON_MOUTH_MAP: Record<string, [string, number][]> = {
+	blinkLeft: [["eyeBlinkLeft", 1]],
+	blinkRight: [["eyeBlinkRight", 1]],
 	happy: [
 		["mouthSmileLeft", 0.5],
 		["mouthSmileRight", 0.5],
@@ -111,6 +125,56 @@ const STANDARD_VRM_MAP: Record<string, [string, number][]> = {
 		["eyeWideRight", 0.2],
 	],
 };
+
+const MOUTH_SOURCE_EXPRESSION_SET = new Set<string>(
+	WEBCAM_MOUTH_SOURCE_EXPRESSIONS,
+);
+
+function getBlendshapeFilter(
+	filters: Map<string, OneEuroFilter>,
+	key: string,
+	minCutoff: number,
+	beta: number,
+): OneEuroFilter {
+	let filter = filters.get(key);
+	if (!filter) {
+		filter = new OneEuroFilter(minCutoff, beta);
+		filters.set(key, filter);
+	}
+	return filter;
+}
+
+function deriveStandardMouthWeights(
+	scoreMap: Map<string, number>,
+	now: number,
+	filters: Map<string, OneEuroFilter>,
+	minCutoff: number,
+	beta: number,
+): Record<StandardMouthExpression, number> {
+	const mouthWeights = Object.fromEntries(
+		STANDARD_MOUTH_EXPRESSIONS.map((expression) => [expression, 0]),
+	) as Record<StandardMouthExpression, number>;
+
+	for (const expression of STANDARD_MOUTH_EXPRESSIONS) {
+		const raw = Math.min(
+			1,
+			STANDARD_VRM_MOUTH_MAP[expression].reduce(
+				(sum, [source, weight]) =>
+					sum + (scoreMap.get(source) ?? 0) * weight,
+				0,
+			),
+		);
+		const filtered = getBlendshapeFilter(
+			filters,
+			`mouth:${expression}`,
+			minCutoff,
+			beta,
+		).filter(raw, now);
+		mouthWeights[expression] = filtered;
+	}
+
+	return mouthWeights;
+}
 
 async function loadVrm(path: string): Promise<VRM> {
 	const buffer = await window.electron.loadVrm(path);
@@ -220,6 +284,10 @@ async function openWebcam(
 
 const DEFAULT_CONFIG: AppConfig = {
 	camera: { position: [0, 0.75, 1.1], lookAt: [0, 0.6, 0], fov: 35 },
+	microphone: {
+		deviceLabel: null,
+		deviceId: null,
+	},
 	model: {
 		path: "VRMs/Twig-dotter-ARKit.vrm",
 		scale: 1.0,
@@ -236,6 +304,14 @@ const DEFAULT_CONFIG: AppConfig = {
 		headFilter: { minCutoff: 1.5, beta: 0.1 },
 		armCalibration: { minCutoff: 1.0, beta: 0.01 },
 		handFilter: { minCutoff: 4.0, beta: 0.5 },
+		lipsync: {
+			enabled: false,
+			modelPath: "models/openlipsync/model.onnx",
+			configPath: null,
+			smoothing: 0.7,
+			audioBlendWeight: 1.0,
+			webcamBlendWeight: 0.35,
+		},
 	},
 };
 
@@ -281,6 +357,27 @@ async function main(): Promise<void> {
 	// ARKit avatars expose 'jawOpen' as a custom expression — direct pass-through.
 	// Standard VRM avatars only have the built-in expression set — use the mapping table.
 	const useARKit = vrm.expressionManager?.getValue("jawOpen") !== undefined;
+	const expressionRouting = inspectVrmExpressionRouting(vrm);
+	const requestedLipSync = Boolean(
+		config.tracking.lipsync?.enabled && config.tracking.lipsync?.modelPath,
+	);
+	const webcamBlendWeight =
+		config.tracking.lipsync?.webcamBlendWeight ?? 0.35;
+	const audioBlendWeight = config.tracking.lipsync?.audioBlendWeight ?? 1.0;
+	let lipSync: LipSyncController | null = null;
+	if (requestedLipSync && config.tracking.lipsync?.modelPath) {
+		try {
+			lipSync = await LipSyncController.create({
+				microphone: config.microphone,
+				modelPath: config.tracking.lipsync.modelPath,
+				configPath: config.tracking.lipsync.configPath ?? null,
+				smoothing: config.tracking.lipsync.smoothing ?? 0.7,
+				routing: expressionRouting,
+			});
+		} catch (error) {
+			console.error("Failed to initialize lip-sync:", error);
+		}
+	}
 
 	const { minCutoff: bsMin, beta: bsBeta } = config.tracking.blendshapeFilter;
 	const bsOverrides = config.tracking.blendshapeFilterOverrides ?? {};
@@ -575,6 +672,22 @@ async function main(): Promise<void> {
 			const poseResult = poseLandmarker.detectForVideo(video, ts + 1);
 
 			const debugBlendshapes: DebugData["blendshapes"] = [];
+			const lipSyncState = lipSync?.getState() ?? {
+				enabled: requestedLipSync,
+				active: false,
+				provider: null,
+				customVisemes: expressionRouting.customVisemeNames,
+				standardMouths: expressionRouting.standardMouthNames,
+				visemes: Object.fromEntries(
+					OPEN_LIPSYNC_VISEMES.map((name) => [
+						name,
+						name === "sil" ? 1 : 0,
+					]),
+				) as Record<(typeof OPEN_LIPSYNC_VISEMES)[number], number>,
+				mouth: Object.fromEntries(
+					STANDARD_MOUTH_EXPRESSIONS.map((name) => [name, 0]),
+				) as Record<StandardMouthExpression, number>,
+			};
 			let debugHead: DebugData["head"] = { pitch: 0, yaw: 0, roll: 0 };
 			const detected = !!(
 				result.faceBlendshapes?.[0] ||
@@ -586,57 +699,142 @@ async function main(): Promise<void> {
 			const em = vrm.expressionManager;
 
 			if (shapes && em) {
+				const webcamSourceMap = new Map<string, number>();
+				const webcamStandardMouth = Object.fromEntries(
+					STANDARD_MOUTH_EXPRESSIONS.map((expression) => [
+						expression,
+						0,
+					]),
+				) as Record<StandardMouthExpression, number>;
+
 				if (useARKit) {
 					for (const shape of shapes) {
 						const name = shape.categoryName;
 						const amplify =
 							config.tracking.blendshapeAmplify[name] ?? 1;
 						const raw = Math.min(1, shape.score * amplify);
-						if (!bsFilters.has(name)) {
-							const p = bsOverrides[name] ?? {
-								minCutoff: bsMin,
-								beta: bsBeta,
-							};
-							bsFilters.set(
-								name,
-								new OneEuroFilter(p.minCutoff, p.beta),
-							);
-						}
-						const filtered = bsFilters.get(name)!.filter(raw, now);
-						em.setValue(name, filtered);
+						const params = bsOverrides[name] ?? {
+							minCutoff: bsMin,
+							beta: bsBeta,
+						};
+						const filtered = getBlendshapeFilter(
+							bsFilters,
+							name,
+							params.minCutoff,
+							params.beta,
+						).filter(raw, now);
+						webcamSourceMap.set(name, filtered);
 						debugBlendshapes.push({ name, value: filtered });
+						if (
+							!lipSyncState.enabled ||
+							!MOUTH_SOURCE_EXPRESSION_SET.has(name)
+						) {
+							em.setValue(name, filtered);
+						}
+					}
+
+					if (lipSyncState.enabled) {
+						const derived = deriveStandardMouthWeights(
+							webcamSourceMap,
+							now,
+							bsFilters,
+							bsMin,
+							bsBeta,
+						);
+						for (const expression of STANDARD_MOUTH_EXPRESSIONS) {
+							webcamStandardMouth[expression] =
+								derived[expression];
+						}
 					}
 				} else {
 					const scoreMap = new Map(
-						shapes.map((s) => [s.categoryName, s.score]),
+						shapes.map((shape) => [
+							shape.categoryName,
+							shape.score,
+						]),
 					);
 					for (const [vrmExpr, sources] of Object.entries(
-						STANDARD_VRM_MAP,
+						STANDARD_VRM_NON_MOUTH_MAP,
 					)) {
 						if (em.getValue(vrmExpr) === undefined) continue;
 						const raw = Math.min(
 							1,
 							sources.reduce(
-								(sum, [src, w]) =>
-									sum + (scoreMap.get(src) ?? 0) * w,
+								(sum, [source, weight]) =>
+									sum + (scoreMap.get(source) ?? 0) * weight,
 								0,
 							),
 						);
-						if (!bsFilters.has(vrmExpr))
-							bsFilters.set(
-								vrmExpr,
-								new OneEuroFilter(bsMin, bsBeta),
-							);
-						const filtered = bsFilters
-							.get(vrmExpr)!
-							.filter(raw, now);
+						const filtered = getBlendshapeFilter(
+							bsFilters,
+							vrmExpr,
+							bsMin,
+							bsBeta,
+						).filter(raw, now);
 						em.setValue(vrmExpr, filtered);
 						debugBlendshapes.push({
 							name: vrmExpr,
 							value: filtered,
 						});
 					}
+
+					const derived = deriveStandardMouthWeights(
+						scoreMap,
+						now,
+						bsFilters,
+						bsMin,
+						bsBeta,
+					);
+					for (const expression of STANDARD_MOUTH_EXPRESSIONS) {
+						webcamStandardMouth[expression] = derived[expression];
+						if (!lipSyncState.enabled) {
+							const actualExpression =
+								expressionRouting.standardMouths[expression];
+							if (actualExpression) {
+								em.setValue(
+									actualExpression,
+									derived[expression],
+								);
+							}
+							debugBlendshapes.push({
+								name: expression,
+								value: derived[expression],
+							});
+						}
+					}
 				}
+
+				if (lipSyncState.enabled) {
+					for (const expression of STANDARD_MOUTH_EXPRESSIONS) {
+						const actualExpression =
+							expressionRouting.standardMouths[expression];
+						if (!actualExpression) continue;
+						const audioValue = lipSyncState.mouth[expression] ?? 0;
+						const webcamValue =
+							webcamStandardMouth[expression] ?? 0;
+						em.setValue(
+							actualExpression,
+							Math.min(
+								1,
+								webcamValue * webcamBlendWeight +
+									audioValue * audioBlendWeight,
+							),
+						);
+					}
+
+					for (const [viseme, actualExpression] of Object.entries(
+						expressionRouting.customVisemes,
+					)) {
+						if (!actualExpression) continue;
+						em.setValue(
+							actualExpression,
+							lipSyncState.visemes[
+								viseme as (typeof OPEN_LIPSYNC_VISEMES)[number]
+							] ?? 0,
+						);
+					}
+				}
+
 				em.update();
 			}
 
@@ -797,6 +995,20 @@ async function main(): Promise<void> {
 				blendshapes: debugBlendshapes,
 				head: debugHead,
 				arms: debugArms,
+				visemes: Object.entries(lipSyncState.visemes).map(
+					([name, value]) => ({ name, value }),
+				),
+				mouth: STANDARD_MOUTH_EXPRESSIONS.map((name) => ({
+					name,
+					value: lipSyncState.mouth[name] ?? 0,
+				})),
+				lipsync: {
+					enabled: lipSyncState.enabled,
+					active: lipSyncState.active,
+					provider: lipSyncState.provider,
+					customVisemes: lipSyncState.customVisemes,
+					standardMouths: lipSyncState.standardMouths,
+				},
 			});
 		}
 

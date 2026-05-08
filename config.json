@@ -8,6 +8,10 @@
     "deviceLabel": null,
     "deviceId": null
   },
+  "microphone": {
+    "deviceLabel": null,
+    "deviceId": null
+  },
   "model": {
     "path": "VRMs/Twig-dotter-ARKit.vrm",
     "scale": 1.0,
@@ -39,6 +43,14 @@
     "handFilter": {
       "minCutoff": 4.0,
       "beta": 0.5
+    },
+    "lipsync": {
+      "enabled": false,
+      "modelPath": "models/openlipsync/model.onnx",
+      "configPath": null,
+      "smoothing": 0.7,
+      "audioBlendWeight": 1.0,
+      "webcamBlendWeight": 0.35
     }
   }
 }

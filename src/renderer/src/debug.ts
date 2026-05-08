@@ -17,6 +17,15 @@ interface DebugData {
 	blendshapes: DebugBlendshape[];
 	head: DebugHead;
 	arms: Array<{ name: string; value: number }>;
+	visemes: DebugBlendshape[];
+	mouth: DebugBlendshape[];
+	lipsync: {
+		enabled: boolean;
+		active: boolean;
+		provider: string | null;
+		customVisemes: string[];
+		standardMouths: string[];
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -240,11 +249,17 @@ function addSectionLabel(container: HTMLElement, text: string): void {
 let headSection: HTMLElement | null = null;
 let armsSection: HTMLElement | null = null;
 let bsSection: HTMLElement | null = null;
+let lipSyncSection: HTMLElement | null = null;
+let visemeSection: HTMLElement | null = null;
+let mouthSection: HTMLElement | null = null;
 
 function ensureSections(
 	hasHead: boolean,
 	hasArms: boolean,
 	hasBlendshapes: boolean,
+	hasLipSync: boolean,
+	hasVisemes: boolean,
+	hasMouth: boolean,
 ): void {
 	if (hasHead && !headSection) {
 		addSectionLabel(scrollContainer, "Head Rotation");
@@ -260,6 +275,21 @@ function ensureSections(
 		addSectionLabel(scrollContainer, "Blendshapes");
 		bsSection = document.createElement("div");
 		scrollContainer.appendChild(bsSection);
+	}
+	if (hasLipSync && !lipSyncSection) {
+		addSectionLabel(scrollContainer, "Lip Sync");
+		lipSyncSection = document.createElement("div");
+		scrollContainer.appendChild(lipSyncSection);
+	}
+	if (hasVisemes && !visemeSection) {
+		addSectionLabel(scrollContainer, "Visemes");
+		visemeSection = document.createElement("div");
+		scrollContainer.appendChild(visemeSection);
+	}
+	if (hasMouth && !mouthSection) {
+		addSectionLabel(scrollContainer, "Mouth");
+		mouthSection = document.createElement("div");
+		scrollContainer.appendChild(mouthSection);
 	}
 }
 
@@ -279,7 +309,14 @@ window.electron.onDebugData((data: DebugData) => {
 
 	const hasHead =
 		data.head.pitch !== 0 || data.head.yaw !== 0 || data.head.roll !== 0;
-	ensureSections(hasHead, data.arms.length > 0, data.blendshapes.length > 0);
+	ensureSections(
+		hasHead,
+		data.arms.length > 0,
+		data.blendshapes.length > 0,
+		true,
+		data.visemes.length > 0,
+		data.mouth.length > 0,
+	);
 
 	if (headSection) {
 		updateHeadRow(headSection, "pitch", data.head.pitch);
@@ -296,6 +333,46 @@ window.electron.onDebugData((data: DebugData) => {
 	if (bsSection) {
 		for (const bs of data.blendshapes) {
 			updateBlendshapeRow(bsSection, bs.name, bs.value);
+		}
+	}
+
+	if (lipSyncSection) {
+		updateBlendshapeRow(
+			lipSyncSection,
+			"enabled",
+			data.lipsync.enabled ? 1 : 0,
+		);
+		updateBlendshapeRow(
+			lipSyncSection,
+			"active",
+			data.lipsync.active ? 1 : 0,
+		);
+		updateBlendshapeRow(
+			lipSyncSection,
+			`provider:${data.lipsync.provider ?? "none"}`,
+			data.lipsync.provider ? 1 : 0,
+		);
+		updateBlendshapeRow(
+			lipSyncSection,
+			`custom:${data.lipsync.customVisemes.join(",") || "none"}`,
+			data.lipsync.customVisemes.length > 0 ? 1 : 0,
+		);
+		updateBlendshapeRow(
+			lipSyncSection,
+			`mouths:${data.lipsync.standardMouths.join(",") || "none"}`,
+			data.lipsync.standardMouths.length > 0 ? 1 : 0,
+		);
+	}
+
+	if (visemeSection) {
+		for (const viseme of data.visemes) {
+			updateBlendshapeRow(visemeSection, viseme.name, viseme.value);
+		}
+	}
+
+	if (mouthSection) {
+		for (const mouth of data.mouth) {
+			updateBlendshapeRow(mouthSection, mouth.name, mouth.value);
 		}
 	}
 });

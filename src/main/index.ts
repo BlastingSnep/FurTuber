@@ -1,8 +1,21 @@
 import { app, BrowserWindow, ipcMain, globalShortcut } from "electron";
-import { join } from "path";
+import { dirname, join } from "path";
 import { readFileSync } from "fs";
 
 let debugWin: BrowserWindow | null = null;
+
+function readRelativeBinaryAsset(relativePath: string): ArrayBuffer {
+	const resolvedPath = join(app.getAppPath(), relativePath);
+	const buffer = readFileSync(resolvedPath);
+	return buffer.buffer.slice(
+		buffer.byteOffset,
+		buffer.byteOffset + buffer.byteLength,
+	);
+}
+
+function readRelativeTextAsset(relativePath: string): string {
+	return readFileSync(join(app.getAppPath(), relativePath), "utf-8");
+}
 
 function createDebugWindow(): void {
 	debugWin = new BrowserWindow({
@@ -60,16 +73,40 @@ function createWindow(): void {
 
 app.whenReady().then(() => {
 	ipcMain.handle("load-vrm", (_event, relativePath: string) => {
-		const vrmPath = join(app.getAppPath(), relativePath);
-		return readFileSync(vrmPath).buffer;
+		return readRelativeBinaryAsset(relativePath);
 	});
 
 	ipcMain.handle("load-config", () => {
-		const configPath = join(app.getAppPath(), "config.json");
 		try {
-			return JSON.parse(readFileSync(configPath, "utf-8"));
+			return JSON.parse(readRelativeTextAsset("config.json"));
 		} catch {
 			return null;
+		}
+	});
+
+	ipcMain.handle("load-binary-asset", (_event, relativePath: string) => {
+		try {
+			return readRelativeBinaryAsset(relativePath);
+		} catch (error) {
+			const message =
+				error instanceof Error ? error.message : String(error);
+			throw new Error(
+				`Failed to load binary asset "${relativePath}" from "${dirname(
+					join(app.getAppPath(), relativePath),
+				)}": ${message}`,
+			);
+		}
+	});
+
+	ipcMain.handle("load-text-asset", (_event, relativePath: string) => {
+		try {
+			return readRelativeTextAsset(relativePath);
+		} catch (error) {
+			const message =
+				error instanceof Error ? error.message : String(error);
+			throw new Error(
+				`Failed to load text asset "${relativePath}": ${message}`,
+			);
 		}
 	});
 

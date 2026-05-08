@@ -10,6 +10,10 @@ interface AppConfig {
 		deviceLabel?: string | null;
 		deviceId?: string | null;
 	};
+	microphone?: {
+		deviceLabel?: string | null;
+		deviceId?: string | null;
+	};
 	model: {
 		path: string;
 		scale: number;
@@ -30,6 +34,14 @@ interface AppConfig {
 			beta?: number;
 		};
 		handFilter?: { minCutoff?: number; beta?: number };
+		lipsync?: {
+			enabled?: boolean;
+			modelPath?: string;
+			configPath?: string | null;
+			smoothing?: number;
+			audioBlendWeight?: number;
+			webcamBlendWeight?: number;
+		};
 	};
 }
 
@@ -38,12 +50,23 @@ interface DebugData {
 	blendshapes: Array<{ name: string; value: number }>;
 	head: { pitch: number; yaw: number; roll: number };
 	arms: Array<{ name: string; value: number }>;
+	visemes: Array<{ name: string; value: number }>;
+	mouth: Array<{ name: string; value: number }>;
+	lipsync: {
+		enabled: boolean;
+		active: boolean;
+		provider: string | null;
+		customVisemes: string[];
+		standardMouths: string[];
+	};
 }
 
 interface Window {
 	electron: {
 		loadVrm(filename: string): Promise<ArrayBuffer>;
 		loadConfig(): Promise<AppConfig | null>;
+		loadBinaryAsset(relativePath: string): Promise<ArrayBuffer>;
+		loadTextAsset(relativePath: string): Promise<string>;
 		sendDebugData(data: DebugData): void;
 		onDebugData(callback: (data: DebugData) => void): void;
 	};
